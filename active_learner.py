@@ -185,7 +185,7 @@ class ActiveLearner:
         if self.method == "generative":
             #compute_metrics = self.compute_metrics_generative  # passing compute metrucs to seq2seq trainer seems buggy/does not work well
             pass
-        if self.method == "nli" or self.method == "nsp":
+        elif self.method == "nli" or self.method == "nsp":
             compute_metrics = self.compute_metrics_nli_binary
         elif self.method == "standard_dl":
             compute_metrics = self.compute_metrics_standard
