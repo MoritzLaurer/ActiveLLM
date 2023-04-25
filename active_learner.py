@@ -58,9 +58,9 @@ class ActiveLearner:
             tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=model_max_length);
             model = AutoModelForSeq2SeqLM.from_pretrained(
                 model_name,
-                **self.model_params
+                **model_params
             );
-            generation_config = GenerationConfig.from_pretrained(model_name, **self.config_params)
+            generation_config = GenerationConfig.from_pretrained(model_name, **config_params)
             model.generation_config = generation_config
         elif method == "nli":
             tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=model_max_length);
