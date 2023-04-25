@@ -65,7 +65,7 @@ class ActiveLearner:
         elif method == "nli":
             tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=model_max_length);
             model = AutoModelForSequenceClassification.from_pretrained(model_name);
-        elif method == "standard_dl":
+        elif method == "standard_classifier":
             tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=model_max_length);
             # define config. label text to label id in alphabetical order
             label2id = dict(zip(np.sort(label_text_alphabetical), np.sort(pd.factorize(label_text_alphabetical, sort=True)[0]).tolist()))  # .astype(int).tolist()
@@ -128,7 +128,7 @@ class ActiveLearner:
             dataset_corpus = dataset_corpus.map(self.tokenize_func_nli, batched=True)
             if self.separate_testset:
                 dataset_test = dataset_test.map(self.tokenize_func_nli, batched=True)
-        elif self.method == "standard_dl":
+        elif self.method == "standard_classifier":
             dataset_corpus = dataset_corpus.map(self.tokenize_func_mono, batched=True)
             if self.separate_testset:
                 dataset_test = dataset_test.map(self.tokenize_func_mono, batched=True)
@@ -187,7 +187,7 @@ class ActiveLearner:
             pass
         elif self.method == "nli" or self.method == "nsp":
             compute_metrics = self.compute_metrics_nli_binary
-        elif self.method == "standard_dl":
+        elif self.method == "standard_classifier":
             compute_metrics = self.compute_metrics_standard
         else:
             raise Exception(f"Compute metrics for trainer not specified correctly: {self.method}")
@@ -444,7 +444,7 @@ class ActiveLearner:
             dataset_train_update = dataset_train_update.map(self.tokenize_func_generative, batched=True)
         elif self.method == "nli":
             dataset_train_update = dataset_train_update.map(self.tokenize_func_nli, batched=True)
-        elif self.method == "standard_dl":
+        elif self.method == "standard_classifier":
             dataset_train_update = dataset_train_update.map(self.tokenize_func_mono, batched=True)
         else:
             raise Exception(f"Tokenization not implemented for method {self.method}")
@@ -480,7 +480,7 @@ class ActiveLearner:
 
 
 
-    #### old functions for active learning with NLI models
+    #### old functions for active learning with NLI classification models
     def format_pd_dataset_for_nli(self, hypo_label_dic=None):
         # only run for NLI
         self.hypo_label_dic = hypo_label_dic
