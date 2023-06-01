@@ -31,7 +31,7 @@ class ActiveLearner:
         #self.results_test = {}
 
 
-    def load_pd_dataset(self, df_corpus=None, text_column="text", label_column="label", df_test=None, separate_testset=True):
+    def load_pd_dataset(self, df_corpus=None, text_column="text", label_column="label", df_test=None, df_train=None, separate_testset=True):
         self.separate_testset = separate_testset
         self.text_column = text_column
         self.label_column = label_column
@@ -41,6 +41,9 @@ class ActiveLearner:
         if self.separate_testset:
             self.df_test = df_test#.reset_index(drop=True)
             self.df_test.index.name = "idx"
+        if df_train is not None:
+            self.df_train = df_train
+            self.df_train.index.name = "idx"
 
         # creating these dfs for records; to be able to sample training data from corpus;
         # and to have copy with unformatted dfs (some methods require reformatting of dfs)
@@ -72,7 +75,7 @@ class ActiveLearner:
             id2label = dict(zip(np.sort(pd.factorize(label_text_alphabetical, sort=True)[0]).tolist(), np.sort(label_text_alphabetical)))
             config = AutoConfig.from_pretrained(model_name, label2id=label2id, id2label=id2label);
             # load model with config
-            model = AutoModelForSequenceClassification.from_pretrained(model_name, config=config);
+            model = AutoModelForSequenceClassification.from_pretrained(model_name, config=config, ignore_mismatched_sizes=True);
         else:
             raise Exception(f"Method {method} not implemented.")
 
@@ -119,6 +122,8 @@ class ActiveLearner:
         dataset_corpus = datasets.Dataset.from_pandas(self.df_corpus, preserve_index=True)
         if self.separate_testset:
             dataset_test = datasets.Dataset.from_pandas(self.df_test, preserve_index=True)
+        if self.df_train is not None:
+            dataset_train = datasets.Dataset.from_pandas(self.df_train, preserve_index=True)
 
         if self.method == "generative":
             dataset_corpus = dataset_corpus.map(self.tokenize_func_generative, batched=True)
@@ -132,6 +137,8 @@ class ActiveLearner:
             dataset_corpus = dataset_corpus.map(self.tokenize_func_mono, batched=True)
             if self.separate_testset:
                 dataset_test = dataset_test.map(self.tokenize_func_mono, batched=True)
+            if self.df_train is not None:
+                dataset_train = dataset_train.map(self.tokenize_func_mono, batched=True)
 
 
         # trainer/model does not accept other columns
@@ -142,7 +149,7 @@ class ActiveLearner:
         
         self.dataset = datasets.DatasetDict(
             {"corpus": dataset_corpus,
-             "train": None,  # because no trainset in the beginning. first needs to be sampled with al
+             "train": None if self.df_train is not None else dataset_train,  # because no trainset in the beginning. first needs to be sampled with al
              "test": dataset_test if self.separate_testset else None 
              }
         )
@@ -203,9 +210,9 @@ class ActiveLearner:
                 model=self.model,
                 tokenizer=self.tokenizer,
                 args=self.train_args,
-                train_dataset=self.dataset["train"],
+                train_dataset=self.dataset["train"],  # this is not used in first run, because train set first needs to be 0-shot sampled
                 eval_dataset=self.dataset["test"] if self.separate_testset == True else self.dataset["corpus"],  # self.dataset["test"],
-                compute_metrics=lambda eval_pred: compute_metrics(eval_pred, label_text_alphabetical=self.label_text_alphabetical, only_return_probabilities=False),
+                compute_metrics=lambda eval_pred: compute_metrics(eval_pred, label_text_alphabetical=self.label_text_alphabetical),
                 data_collator=data_collator,
             )
         else:
@@ -213,9 +220,9 @@ class ActiveLearner:
                 model=self.model,
                 tokenizer=self.tokenizer,
                 args=self.train_args,
-                train_dataset=self.dataset["train"],
+                train_dataset=self.dataset["train"],  # this is not used in first run, because train set first needs to be 0-shot sampled
                 eval_dataset=self.dataset["test"] if self.separate_testset == True else self.dataset["corpus"],  #self.dataset["test"],
-                compute_metrics=lambda eval_pred: compute_metrics(eval_pred, label_text_alphabetical=self.label_text_alphabetical, only_return_probabilities=False)
+                compute_metrics=lambda eval_pred: compute_metrics(eval_pred, label_text_alphabetical=self.label_text_alphabetical, only_inferece_for_probabilities=False)
             )
 
 
@@ -223,18 +230,24 @@ class ActiveLearner:
             trainer.train()
             self.model = trainer.model
 
-        # code in case there is a separate test set
-        #results_test = trainer.evaluate(eval_dataset=self.dataset["test"])  # eval_dataset=encoded_dataset["test"]
-        #print("\n", results_test, "\n")
-        #self.results_test.update({f"test_iter_{self.n_iteration}": results_test})
-
         # inference on ('unlabeled') corpus for next sampling round
         if self.method != "generative":
-            metrics = trainer.evaluate(eval_dataset=self.dataset["corpus"])  # eval_dataset=encoded_dataset["test"]
+            if self.separate_testset:
+                # first inference run on test set for metrics
+                print("Doing inference on test set for metrics. Result:\n")
+                metrics = trainer.evaluate(eval_dataset=self.dataset["test"])  # eval_dataset=encoded_dataset["test"]
+                # second inference run on corpus for uncertainty scores for sampling
+                print("Doing inference on corpus for uncertainty scores. Result:\n")
+                trainer.compute_metrics = lambda eval_pred: compute_metrics(eval_pred, label_text_alphabetical=self.label_text_alphabetical, only_inferece_for_probabilities=True)
+                trainer.evaluate(eval_dataset=self.dataset["corpus"])  # eval_dataset=encoded_dataset["test"]
+            else:
+                metrics = trainer.evaluate(eval_dataset=self.dataset["corpus"])  # eval_dataset=encoded_dataset["test"]
         elif self.method == "generative": 
             # need to calculate metrics and uncertainty outside of trainer for generative models
             # seq2seq trainer evaluate/prediction_step has issues like this hack https://github.com/huggingface/transformers/blob/v4.28.1/src/transformers/trainer_seq2seq.py#L273
             # this means that I cannot pass a generate_config, decode labels correctly, or calculate uncertainty in compute_metrics
+            if self.separate_testset:
+                raise NotImplementedError("Separate test set not implemented for generative models")
             metrics = self.metrics_uncertainty_generative()
 
         self.metrics.update({f"iter_{self.n_iteration}": metrics})
@@ -349,7 +362,7 @@ class ActiveLearner:
 
     ### custom query strategies
     def min_certainty(self, n_sample_al=20):
-        probs_arr = np.array(self.iteration_probabilities)
+        probs_arr = np.array(self.iteration_probabilities_corpus)
         
         # Get indices of n smallest numbers
         probs_min_indices = np.argpartition(probs_arr, n_sample_al)[:n_sample_al]
@@ -378,7 +391,8 @@ class ActiveLearner:
 
 
     def sample_breaking_ties(self, n_sample_al=20):
-        hypo_prob_entail = self.iteration_probabilities
+        # TODO: also implement this for other compute metrics and other sampling strategies
+        hypo_prob_entail = self.iteration_probabilities_corpus
         # mapping entail probabilities to labels
         hypo_prob_entail = [{label_text: round(entail_score, 4) for entail_score, label_text in zip(prob_entail, self.label_text_alphabetical)} for prob_entail in hypo_prob_entail]
 
@@ -415,7 +429,7 @@ class ActiveLearner:
     ## update da
     # remove sampled texts from corpus
     def update_dataset(self):
-        print("Examples in previous corpus iteration: ", len(set(self.dataset["corpus"]["idx"])))
+        print("Updating dataset. Texts in previous corpus iteration (without augmentation): ", len(set(self.dataset["corpus"]["idx"])))
 
         ## update index for entire train set, not only new sample
         self.index_train_all = list(set(self.index_train_all + self.index_al_sample))
@@ -433,7 +447,8 @@ class ActiveLearner:
             # reformat training data for NLI training format
             df_train_update = self.format_nli_trainset(df_corpus_al_sample)
         else:
-            raise Exception(f"Training data storage and formatting not implemented for method {self.method}")
+            df_train_update = df_corpus_al_sample
+            #raise Exception(f"Training data storage and formatting not implemented for method {self.method}")
 
         ## tokenize trainset and format to hf
         # this needs to be repeated at every al iteration, because the new sampled training data needs to be converted to the NLI training format (above) and then tokenized
@@ -481,7 +496,7 @@ class ActiveLearner:
 
 
     #### functions for active learning with NLI classification models
-    def format_pd_dataset_for_nli(self, hypo_label_dic=None):
+    def format_pd_dataset_for_nli_test(self, hypo_label_dic=None):
         # only run for NLI
         self.hypo_label_dic = hypo_label_dic
         # only formatting to nli test format (not train format), because not training data yet, first needs to be sampled after first 0-shot run.
@@ -551,40 +566,56 @@ class ActiveLearner:
         return df_test_copy
 
 
-    def compute_metrics_standard(self, eval_pred, label_text_alphabetical=None):
+    def compute_metrics_standard(self, eval_pred, label_text_alphabetical=None, only_inferece_for_probabilities=False):
         labels = eval_pred.label_ids
         pred_logits = eval_pred.predictions
         preds_max = np.argmax(pred_logits, axis=1)  # argmax on each row (axis=1) in the tensor
-        ## metrics
-        precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(labels, preds_max, average='macro')
-        precision_micro, recall_micro, f1_micro, _ = precision_recall_fscore_support(labels, preds_max, average='micro')
-        acc_balanced = balanced_accuracy_score(labels, preds_max)
-        acc_not_balanced = accuracy_score(labels, preds_max)
 
-        metrics = {'f1_macro': f1_macro,
-                   'f1_micro': f1_micro,
-                   'accuracy_balanced': acc_balanced,
-                   'accuracy_not_b': acc_not_balanced,
-                   'precision_macro': precision_macro,
-                   'recall_macro': recall_macro,
-                   'precision_micro': precision_micro,
-                   'recall_micro': recall_micro,
-                   # 'label_gold_raw': labels,
-                   # 'label_predicted_raw': preds_max
-                   }
-        print("Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["label_gold_raw", "label_predicted_raw"]})  # print metrics but without label lists
-        print("Detailed metrics: ",
-              classification_report(labels, preds_max, labels=np.sort(pd.factorize(label_text_alphabetical, sort=True)[0]), target_names=label_text_alphabetical, sample_weight=None, digits=2,
-                                    output_dict=True,
-                                    zero_division='warn'), "\n")
+        softmax = torch.nn.Softmax(dim=1)
+        pred_softmax = softmax(torch.tensor(pred_logits, dtype=torch.float32)).tolist()
 
-        # store the respective label values and predictions for each iteration in order to be able to extract it later for downstream analyses
-        self.iteration_label_gold = labels
-        self.iteration_label_predicted = preds_max
+        if not only_inferece_for_probabilities:
+            ## metrics
+            precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(labels, preds_max, average='macro')
+            precision_micro, recall_micro, f1_micro, _ = precision_recall_fscore_support(labels, preds_max, average='micro')
+            acc_balanced = balanced_accuracy_score(labels, preds_max)
+            acc_not_balanced = accuracy_score(labels, preds_max)
+
+            metrics = {'f1_macro': f1_macro,
+                       'f1_micro': f1_micro,
+                       'accuracy_balanced': acc_balanced,
+                       'accuracy_not_b': acc_not_balanced,
+                       'precision_macro': precision_macro,
+                       'recall_macro': recall_macro,
+                       'precision_micro': precision_micro,
+                       'recall_micro': recall_micro,
+                       # 'label_gold_raw': labels,
+                       # 'label_predicted_raw': preds_max
+                       }
+            print("Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["label_gold_raw", "label_predicted_raw"]})  # print metrics but without label lists
+            print("Detailed metrics: ",
+                  classification_report(labels, preds_max, labels=np.sort(pd.factorize(label_text_alphabetical, sort=True)[0]), target_names=label_text_alphabetical, sample_weight=None, digits=2,
+                                        output_dict=True,
+                                        zero_division='warn'), "\n")
+
+            # store the respective label values and predictions for each iteration in order to be able to extract it later for downstream analyses
+            self.iteration_label_gold_test = labels
+            self.iteration_label_predicted_test = preds_max
+            # also store the probabilities for the al sampling strategy
+            self.iteration_probabilities_test = pred_softmax
+
+        elif only_inferece_for_probabilities:
+            # store the respective label values and predictions for each iteration in order to be able to extract it later for downstream analyses
+            self.iteration_label_gold_corpus = labels
+            self.iteration_label_predicted_corpus = preds_max
+            # also store the probabilities for the al sampling strategy
+            self.iteration_probabilities_corpus = pred_softmax
+            metrics = {"no_metrics_calculated": 0}  # to void bug from hf trainer
 
         return metrics
 
-    def compute_metrics_nli_binary(self, eval_pred, label_text_alphabetical=None, only_return_probabilities=False):
+
+    def compute_metrics_nli_binary(self, eval_pred, label_text_alphabetical=None, only_inferece_for_probabilities=False):
         predictions, labels = eval_pred
 
         # split in chunks with predictions for each hypothesis for one unique premise
@@ -610,41 +641,49 @@ class ActiveLearner:
                 # argmax on raw logits
                 hypo_position_highest_prob.append(np.argmax(chunk[:, 0]))  # only accesses the first column of the array, i.e. the entailment prediction logit of all hypos and takes the highest one
 
-        # if not only_return_probabilities:
         label_chunks_lst = list(chunks(labels, len(set(label_text_alphabetical))))
         label_position_gold = []
         for chunk in label_chunks_lst:
             label_position_gold.append(np.argmin(chunk))  # argmin to detect the position of the 0 among the 1s
 
         ## metrics
-        precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(label_position_gold, hypo_position_highest_prob,
-                                                                                     average='macro')  # https://scikit-learn.org/stable/modules/generated/sklearn.metrics.precision_recall_fscore_support.html
-        precision_micro, recall_micro, f1_micro, _ = precision_recall_fscore_support(label_position_gold, hypo_position_highest_prob,
-                                                                                     average='micro')  # https://scikit-learn.org/stable/modules/generated/sklearn.metrics.precision_recall_fscore_support.html
-        acc_balanced = balanced_accuracy_score(label_position_gold, hypo_position_highest_prob)
-        acc_not_balanced = accuracy_score(label_position_gold, hypo_position_highest_prob)
-        metrics = {'f1_macro': f1_macro,
-                   'f1_micro': f1_micro,
-                   'accuracy_balanced': acc_balanced,
-                   'accuracy_not_b': acc_not_balanced,
-                   'precision_macro': precision_macro,
-                   'recall_macro': recall_macro,
-                   'precision_micro': precision_micro,
-                   'recall_micro': recall_micro,
-                   # 'label_gold_raw': label_position_gold,
-                   # 'label_predicted_raw': hypo_position_highest_prob
-                   }
-        print("Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["label_gold_raw", "label_predicted_raw"]})  # print metrics but without label lists
-        print("Detailed metrics: ",
-              classification_report(label_position_gold, hypo_position_highest_prob, labels=np.sort(pd.factorize(label_text_alphabetical, sort=True)[0]), target_names=label_text_alphabetical,
-                                    sample_weight=None, digits=2, output_dict=True,
-                                    zero_division='warn'), "\n")
+        if not only_inferece_for_probabilities:
+            precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(label_position_gold, hypo_position_highest_prob,
+                                                                                         average='macro')  # https://scikit-learn.org/stable/modules/generated/sklearn.metrics.precision_recall_fscore_support.html
+            precision_micro, recall_micro, f1_micro, _ = precision_recall_fscore_support(label_position_gold, hypo_position_highest_prob,
+                                                                                         average='micro')  # https://scikit-learn.org/stable/modules/generated/sklearn.metrics.precision_recall_fscore_support.html
+            acc_balanced = balanced_accuracy_score(label_position_gold, hypo_position_highest_prob)
+            acc_not_balanced = accuracy_score(label_position_gold, hypo_position_highest_prob)
+            metrics = {'f1_macro': f1_macro,
+                       'f1_micro': f1_micro,
+                       'accuracy_balanced': acc_balanced,
+                       'accuracy_not_b': acc_not_balanced,
+                       'precision_macro': precision_macro,
+                       'recall_macro': recall_macro,
+                       'precision_micro': precision_micro,
+                       'recall_micro': recall_micro,
+                       # 'label_gold_raw': label_position_gold,
+                       # 'label_predicted_raw': hypo_position_highest_prob
+                       }
+            print("Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["label_gold_raw", "label_predicted_raw"]})  # print metrics but without label lists
+            print("Detailed metrics: ",
+                  classification_report(label_position_gold, hypo_position_highest_prob, labels=np.sort(pd.factorize(label_text_alphabetical, sort=True)[0]), target_names=label_text_alphabetical,
+                                        sample_weight=None, digits=2, output_dict=True,
+                                        zero_division='warn'), "\n")
 
-        # store the respective label values and predictions for each iteration in order to be able to extract it later for downstream analyses
-        self.iteration_label_gold = label_position_gold
-        self.iteration_label_predicted = hypo_position_highest_prob
-        # also store the probabilities for the al sampling strategy
-        self.iteration_probabilities = hypo_probabilities_entail
+            # store the respective label values and predictions for each iteration in order to be able to extract it later for downstream analyses
+            self.iteration_label_gold_test = label_position_gold
+            self.iteration_label_predicted_test = hypo_position_highest_prob
+            # also store the probabilities for the al sampling strategy
+            self.iteration_probabilities_test = hypo_probabilities_entail
+
+        elif only_inferece_for_probabilities:
+            # store the respective label values and predictions for each iteration in order to be able to extract it later for downstream analyses
+            self.iteration_label_gold_corpus = label_position_gold
+            self.iteration_label_predicted_corpus = hypo_position_highest_prob
+            # also store the probabilities for the al sampling strategy
+            self.iteration_probabilities_corpus = hypo_probabilities_entail
+            metrics = {"no_metrics_calculated": 0}  # to void bug from hf trainer
 
         return metrics
 
