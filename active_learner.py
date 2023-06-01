@@ -480,7 +480,7 @@ class ActiveLearner:
 
 
 
-    #### old functions for active learning with NLI classification models
+    #### functions for active learning with NLI classification models
     def format_pd_dataset_for_nli(self, hypo_label_dic=None):
         # only run for NLI
         self.hypo_label_dic = hypo_label_dic
@@ -490,6 +490,7 @@ class ActiveLearner:
             self.df_test = self.format_nli_testset(df_test=self.df_test_original)
 
 
+    # TODO: it seems like one of the NLI format functions produces downstream issues if there is no/very little data for a class (?)
     def format_nli_trainset(self, df_train=None):  # df_train=None, hypo_label_dic=None, random_seed=42
         print(f"\nFor NLI: Augmenting data by adding random not_entail examples to the train set from other classes within the train set.")
         print(f"Length of df_train before this step is: {len(df_train)}.")
