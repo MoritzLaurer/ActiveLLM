@@ -31,18 +31,18 @@ class ActiveLearner:
         #self.results_test = {}
 
 
-    def load_pd_dataset(self, df_corpus=None, text_column="text", label_column="label", df_test=None, df_train=None, separate_testset=True):
+    def load_pd_dataset(self, df_corpus=None, text_column="text", label_column="label", df_test=None, df_train_seed=None, separate_testset=True):
         self.separate_testset = separate_testset
         self.text_column = text_column
         self.label_column = label_column
 
         self.df_corpus = df_corpus#.reset_index(drop=True)
         self.df_corpus.index.name = "idx"
+        self.df_train = df_train_seed
         if self.separate_testset:
             self.df_test = df_test#.reset_index(drop=True)
             self.df_test.index.name = "idx"
-        if df_train is not None:
-            self.df_train = df_train
+        if df_train_seed is not None:
             self.df_train.index.name = "idx"
 
         # creating these dfs for records; to be able to sample training data from corpus;
@@ -129,10 +129,14 @@ class ActiveLearner:
             dataset_corpus = dataset_corpus.map(self.tokenize_func_generative, batched=True)
             if self.separate_testset:
                 dataset_test = dataset_test.map(self.tokenize_func_generative, batched=True)
+            if self.df_train is not None:
+                dataset_train = dataset_train.map(self.tokenize_func_generative, batched=True)
         elif self.method == "nli":
             dataset_corpus = dataset_corpus.map(self.tokenize_func_nli, batched=True)
             if self.separate_testset:
                 dataset_test = dataset_test.map(self.tokenize_func_nli, batched=True)
+            if self.df_train is not None:
+                dataset_train = dataset_train.map(self.tokenize_func_nli, batched=True)
         elif self.method == "standard_classifier":
             dataset_corpus = dataset_corpus.map(self.tokenize_func_mono, batched=True)
             if self.separate_testset:
@@ -149,7 +153,7 @@ class ActiveLearner:
         
         self.dataset = datasets.DatasetDict(
             {"corpus": dataset_corpus,
-             "train": None if self.df_train is not None else dataset_train,  # because no trainset in the beginning. first needs to be sampled with al
+             "train": None if self.df_train is None else dataset_train,  # because no trainset in the beginning. first needs to be sampled with al
              "test": dataset_test if self.separate_testset else None 
              }
         )
@@ -335,13 +339,13 @@ class ActiveLearner:
             'f1_macro': f1_macro,
             'f1_micro': f1_micro,
             'accuracy_balanced': acc_balanced,
-            #'accuracy_not_b': acc_not_balanced,
+            'accuracy_not_b': acc_not_balanced,
             'precision_macro': precision_macro,
             'recall_macro': recall_macro,
             'precision_micro': precision_micro,
             'recall_micro': recall_micro,
-            #'label_gold_raw': labels_gold,
-            #'label_predicted_raw': labels_pred
+            'label_gold_raw': labels_gold,
+            'label_predicted_raw': labels_pred
         }
         # rounding
         metrics = {key : round(metrics[key], 3) if key not in ["label_gold_raw", "label_predicted_raw"] else {key: metrics[key]} for key in metrics}
@@ -391,7 +395,6 @@ class ActiveLearner:
 
 
     def sample_breaking_ties(self, n_sample_al=20):
-        # TODO: also implement this for other compute metrics and other sampling strategies
         hypo_prob_entail = self.iteration_probabilities_corpus
         # mapping entail probabilities to labels
         hypo_prob_entail = [{label_text: round(entail_score, 4) for entail_score, label_text in zip(prob_entail, self.label_text_alphabetical)} for prob_entail in hypo_prob_entail]
@@ -589,8 +592,8 @@ class ActiveLearner:
                        'recall_macro': recall_macro,
                        'precision_micro': precision_micro,
                        'recall_micro': recall_micro,
-                       # 'label_gold_raw': labels,
-                       # 'label_predicted_raw': preds_max
+                       'label_gold_raw': labels,
+                       'label_predicted_raw': preds_max
                        }
             print("Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["label_gold_raw", "label_predicted_raw"]})  # print metrics but without label lists
             print("Detailed metrics: ",
@@ -603,6 +606,8 @@ class ActiveLearner:
             self.iteration_label_predicted_test = preds_max
             # also store the probabilities for the al sampling strategy
             self.iteration_probabilities_test = pred_softmax
+            # for case where no separate test set. if separate test set, this should get overwritten by second call on function with only inference
+            self.iteration_probabilities_corpus = pred_softmax
 
         elif only_inferece_for_probabilities:
             # store the respective label values and predictions for each iteration in order to be able to extract it later for downstream analyses
@@ -662,8 +667,8 @@ class ActiveLearner:
                        'recall_macro': recall_macro,
                        'precision_micro': precision_micro,
                        'recall_micro': recall_micro,
-                       # 'label_gold_raw': label_position_gold,
-                       # 'label_predicted_raw': hypo_position_highest_prob
+                       'label_gold_raw': label_position_gold,
+                       'label_predicted_raw': hypo_position_highest_prob
                        }
             print("Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["label_gold_raw", "label_predicted_raw"]})  # print metrics but without label lists
             print("Detailed metrics: ",
@@ -676,6 +681,8 @@ class ActiveLearner:
             self.iteration_label_predicted_test = hypo_position_highest_prob
             # also store the probabilities for the al sampling strategy
             self.iteration_probabilities_test = hypo_probabilities_entail
+            # for case where no separate test set. if separate test set, this should get overwritten by second call on function with only inference
+            self.iteration_probabilities_corpus = hypo_probabilities_entail
 
         elif only_inferece_for_probabilities:
             # store the respective label values and predictions for each iteration in order to be able to extract it later for downstream analyses
@@ -729,13 +736,13 @@ class ActiveLearner:
             'f1_macro': f1_macro,
             'f1_micro': f1_micro,
             'accuracy_balanced': acc_balanced,
-            # 'accuracy_not_b': acc_not_balanced,
+            'accuracy_not_b': acc_not_balanced,
             'precision_macro': precision_macro,
             'recall_macro': recall_macro,
             'precision_micro': precision_micro,
             'recall_micro': recall_micro,
-            # 'label_gold_raw': labels_gold,
-            # 'label_predicted_raw': labels_pred
+            'label_gold_raw': labels_gold,
+            'label_predicted_raw': labels_pred
         }
         # rounding
         metrics = {key: round(metrics[key], 3) if key not in ["label_gold_raw", "label_predicted_raw"] else {key: metrics[key]} for key in metrics}
