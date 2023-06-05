@@ -68,7 +68,7 @@ class ActiveLearner:
         elif method == "nli":
             tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=model_max_length);
             model = AutoModelForSequenceClassification.from_pretrained(model_name);
-        elif method == "standard_classifier":
+        elif method == "standard_dl":
             tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=model_max_length);
             # define config. label text to label id in alphabetical order
             label2id = dict(zip(np.sort(label_text_alphabetical), np.sort(pd.factorize(label_text_alphabetical, sort=True)[0]).tolist()))  # .astype(int).tolist()
@@ -99,10 +99,10 @@ class ActiveLearner:
             examples[self.text_column],
             max_length=self.max_input_tokens,
             truncation=True,
-            return_tensors="pt", padding=True
+            return_tensors="pt", padding="max_length"  #True
         )
         labels = self.tokenizer(
-            examples[self.label_column], max_length=self.max_output_tokens, truncation=True, return_tensors="pt", padding=True
+            examples[self.label_column], max_length=self.max_output_tokens, truncation=True, return_tensors="pt", padding="max_length" #True
         )
         model_inputs["labels"] = labels["input_ids"]
         return model_inputs
@@ -137,7 +137,7 @@ class ActiveLearner:
                 dataset_test = dataset_test.map(self.tokenize_func_nli, batched=True)
             if self.df_train is not None:
                 dataset_train = dataset_train.map(self.tokenize_func_nli, batched=True)
-        elif self.method == "standard_classifier":
+        elif self.method == "standard_dl":
             dataset_corpus = dataset_corpus.map(self.tokenize_func_mono, batched=True)
             if self.separate_testset:
                 dataset_test = dataset_test.map(self.tokenize_func_mono, batched=True)
@@ -198,7 +198,7 @@ class ActiveLearner:
             pass
         elif self.method == "nli" or self.method == "nsp":
             compute_metrics = self.compute_metrics_nli_binary
-        elif self.method == "standard_classifier":
+        elif self.method == "standard_dl":
             compute_metrics = self.compute_metrics_standard
         else:
             raise Exception(f"Compute metrics for trainer not specified correctly: {self.method}")
@@ -250,9 +250,10 @@ class ActiveLearner:
             # need to calculate metrics and uncertainty outside of trainer for generative models
             # seq2seq trainer evaluate/prediction_step has issues like this hack https://github.com/huggingface/transformers/blob/v4.28.1/src/transformers/trainer_seq2seq.py#L273
             # this means that I cannot pass a generate_config, decode labels correctly, or calculate uncertainty in compute_metrics
+            metrics = self.metrics_uncertainty_generative(dataset=self.dataset["corpus"], dataset_type="corpus")
             if self.separate_testset:
-                raise NotImplementedError("Separate test set not implemented for generative models")
-            metrics = self.metrics_uncertainty_generative()
+                #raise NotImplementedError("Separate test set not implemented for generative models")
+                metrics = self.metrics_uncertainty_generative(dataset=self.dataset["test"], dataset_type="test")
 
         self.metrics.update({f"iter_{self.n_iteration}": metrics})
         self.n_iteration += 1
@@ -267,12 +268,14 @@ class ActiveLearner:
         gc.collect()
 
 
-    def metrics_uncertainty_generative(self):
+    def metrics_uncertainty_generative(self, dataset=None, dataset_type="corpus"):
         self.clean_memory()
         
         # TODO implement metrics calculation with different test-set
-        inputs = {key: torch.tensor(value, dtype=torch.long).to(self.model.device) for key, value in self.dataset["corpus"].remove_columns("idx").to_dict().items()}
-        
+        #inputs = {key: torch.tensor(value, dtype=torch.long).to(self.model.device) for key, value in self.dataset["corpus"].remove_columns("idx").to_dict().items()}
+        # attempt at implementation for different test-set
+        inputs = {key: torch.tensor(value, dtype=torch.long).to(self.model.device) for key, value in dataset.remove_columns("idx").to_dict().items()}
+
         # dataloader for batched inference on pre-tokenized inputs to avoid memory issues
         class TokenizedTextDataset(Dataset):
             def __init__(self, tokenized_inputs):
@@ -336,29 +339,36 @@ class ActiveLearner:
         acc_not_balanced = accuracy_score(labels_gold, labels_pred)
     
         metrics = {
-            'f1_macro': f1_macro,
-            'f1_micro': f1_micro,
-            'accuracy_balanced': acc_balanced,
-            'accuracy_not_b': acc_not_balanced,
-            'precision_macro': precision_macro,
-            'recall_macro': recall_macro,
-            'precision_micro': precision_micro,
-            'recall_micro': recall_micro,
-            'label_gold_raw': labels_gold,
-            'label_predicted_raw': labels_pred
+            'eval_f1_macro': f1_macro,
+            'eval_f1_micro': f1_micro,
+            'eval_accuracy_balanced': acc_balanced,
+            'eval_accuracy_not_b': acc_not_balanced,
+            'eval_precision_macro': precision_macro,
+            'eval_recall_macro': recall_macro,
+            'eval_precision_micro': precision_micro,
+            'eval_recall_micro': recall_micro,
+            'eval_label_gold_raw': labels_gold,
+            'eval_label_predicted_raw': labels_pred
         }
         # rounding
-        metrics = {key : round(metrics[key], 3) if key not in ["label_gold_raw", "label_predicted_raw"] else {key: metrics[key]} for key in metrics}
+        metrics = {key : round(metrics[key], 3) if key not in ["eval_label_gold_raw", "eval_label_predicted_raw"] else {key: metrics[key]} for key in metrics}
     
-        print("  Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["label_gold_raw", "label_predicted_raw"]} )  # print metrics but without label lists
+        print("  Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["eval_label_gold_raw", "eval_label_predicted_raw"]} )  # print metrics but without label lists
         #print("Detailed metrics: ", classification_report(labels, preds_max, labels=np.sort(pd.factorize(label_text_alphabetical, sort=True)[0]), target_names=label_text_alphabetical, sample_weight=None, digits=2, output_dict=True, zero_division='warn'), "\n")
     
         self.clean_memory()
         # save results for this specific iteration
-        self.iteration_label_gold = labels_gold
-        self.iteration_label_predicted = labels_pred
         # also store the probabilities for the al sampling strategy
-        self.iteration_probabilities = reconstructed_scores
+        if dataset_type == "corpus":
+            self.iteration_label_gold_corpus = labels_gold
+            self.iteration_label_predicted_corpus = labels_pred
+            self.iteration_probabilities_corpus = reconstructed_scores
+        elif dataset_type == "test":
+            self.iteration_label_gold_test = labels_gold
+            self.iteration_label_predicted_test = labels_pred
+            self.iteration_probabilities_test = reconstructed_scores
+        else:
+            raise Exception("dataset_type must be either 'corpus' or 'test'.")
         warnings.filterwarnings('default')
 
         return metrics
@@ -391,7 +401,7 @@ class ActiveLearner:
         self.df_corpus_al_sample = df_corpus_sample
         self.df_al_sample_per_iter.update({f"iter_{self.n_iteration}": df_corpus_sample})
         # deletable, just for inspection/debugging
-        self.df_corpus_with_probs = df_corpus_original_without_train
+        #self.df_corpus_with_probs = df_corpus_original_without_train
 
 
     def sample_breaking_ties(self, n_sample_al=20):
@@ -462,7 +472,7 @@ class ActiveLearner:
             dataset_train_update = dataset_train_update.map(self.tokenize_func_generative, batched=True)
         elif self.method == "nli":
             dataset_train_update = dataset_train_update.map(self.tokenize_func_nli, batched=True)
-        elif self.method == "standard_classifier":
+        elif self.method == "standard_dl":
             dataset_train_update = dataset_train_update.map(self.tokenize_func_mono, batched=True)
         else:
             raise Exception(f"Tokenization not implemented for method {self.method}")
@@ -733,21 +743,21 @@ class ActiveLearner:
         acc_not_balanced = accuracy_score(labels_gold, labels_pred)
 
         metrics = {
-            'f1_macro': f1_macro,
-            'f1_micro': f1_micro,
-            'accuracy_balanced': acc_balanced,
-            'accuracy_not_b': acc_not_balanced,
-            'precision_macro': precision_macro,
-            'recall_macro': recall_macro,
-            'precision_micro': precision_micro,
-            'recall_micro': recall_micro,
-            'label_gold_raw': labels_gold,
-            'label_predicted_raw': labels_pred
+            'eval_f1_macro': f1_macro,
+            'eval_f1_micro': f1_micro,
+            'eval_accuracy_balanced': acc_balanced,
+            'eval_accuracy_not_b': acc_not_balanced,
+            'eval_precision_macro': precision_macro,
+            'eval_recall_macro': recall_macro,
+            'eval_precision_micro': precision_micro,
+            'eval_recall_micro': recall_micro,
+            'eval_label_gold_raw': labels_gold,
+            'eval_label_predicted_raw': labels_pred
         }
         # rounding
-        metrics = {key: round(metrics[key], 3) if key not in ["label_gold_raw", "label_predicted_raw"] else {key: metrics[key]} for key in metrics}
+        metrics = {key: round(metrics[key], 3) if key not in ["eval_label_gold_raw", "eval_label_predicted_raw"] else {key: metrics[key]} for key in metrics}
 
-        print("  Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["label_gold_raw", "label_predicted_raw"]})  # print metrics but without label lists
+        print("  Aggregate metrics: ", {key: metrics[key] for key in metrics if key not in ["eval_label_gold_raw", "eval_label_predicted_raw"]})  # print metrics but without label lists
         # print("Detailed metrics: ", classification_report(labels, preds_max, labels=np.sort(pd.factorize(label_text_alphabetical, sort=True)[0]), target_names=label_text_alphabetical, sample_weight=None, digits=2, output_dict=True, zero_division='warn'), "\n")
 
         # clean memory
