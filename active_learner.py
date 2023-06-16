@@ -57,7 +57,7 @@ class ActiveLearner:
     def load_model_tokenizer(self, model_name=None, method=None, label_text_alphabetical=None, model_max_length=256, 
                             config_params=None, model_params=None):
 
-        if method == "generative":
+        if method == "generation":
             tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True, model_max_length=model_max_length);
             model = AutoModelForSeq2SeqLM.from_pretrained(
                 model_name,
@@ -93,7 +93,7 @@ class ActiveLearner:
         self.tokenizer = tokenizer
 
 
-    def tokenize_func_generative(self, examples):
+    def tokenize_func_generation(self, examples):
         # two separate tokenization steps to deal with fact that labels are also input text / count towards max token limit
         model_inputs = self.tokenizer(
             examples[self.text_column],
@@ -125,12 +125,12 @@ class ActiveLearner:
         if self.df_train is not None:
             dataset_train = datasets.Dataset.from_pandas(self.df_train, preserve_index=True)
 
-        if self.method == "generative":
-            dataset_corpus = dataset_corpus.map(self.tokenize_func_generative, batched=True)
+        if self.method == "generation":
+            dataset_corpus = dataset_corpus.map(self.tokenize_func_generation, batched=True)
             if self.separate_testset:
-                dataset_test = dataset_test.map(self.tokenize_func_generative, batched=True)
+                dataset_test = dataset_test.map(self.tokenize_func_generation, batched=True)
             if self.df_train is not None:
-                dataset_train = dataset_train.map(self.tokenize_func_generative, batched=True)
+                dataset_train = dataset_train.map(self.tokenize_func_generation, batched=True)
         elif self.method == "nli":
             dataset_corpus = dataset_corpus.map(self.tokenize_func_nli, batched=True)
             if self.separate_testset:
@@ -146,7 +146,7 @@ class ActiveLearner:
 
 
         # trainer/model does not accept other columns
-        if self.method == "generative":
+        if self.method == "generation":
             dataset_corpus = dataset_corpus.remove_columns(
                 self.df_corpus.columns
             )
@@ -163,7 +163,7 @@ class ActiveLearner:
         # https://huggingface.co/transformers/main_classes/trainer.html#transformers.TrainingArguments
         self.hyperparams_dic = hyperparams_dic
 
-        if self.method == "generative":
+        if self.method == "generation":
             train_args = Seq2SeqTrainingArguments(
                 output_dir=f"./{training_directory}",  # f'./{training_directory}',  #f'./results/{training_directory}',
                 logging_dir=f"./{training_directory}/logs",  # f'./{training_directory}',  #f'./logs/{training_directory}',
@@ -193,8 +193,8 @@ class ActiveLearner:
 
     def train_test_infer(self):
 
-        if self.method == "generative":
-            #compute_metrics = self.compute_metrics_generative  # passing compute metrucs to seq2seq trainer seems buggy/does not work well
+        if self.method == "generation":
+            #compute_metrics = self.compute_metrics_generation  # passing compute metrucs to seq2seq trainer seems buggy/does not work well
             pass
         elif self.method == "nli" or self.method == "nsp":
             compute_metrics = self.compute_metrics_nli_binary
@@ -208,7 +208,7 @@ class ActiveLearner:
             self.load_model_tokenizer(model_name=self.model_name, method=self.method, label_text_alphabetical=self.label_text_alphabetical, model_max_length=self.model_max_length, config_params=self.config_params, model_params=self.model_params);
 
         # create trainer
-        if self.method == "generative":
+        if self.method == "generation":
             data_collator = DataCollatorForSeq2Seq(self.tokenizer, model=self.model)
             trainer = Seq2SeqTrainer(
                 model=self.model,
@@ -235,7 +235,7 @@ class ActiveLearner:
             self.model = trainer.model
 
         # inference on ('unlabeled') corpus for next sampling round
-        if self.method != "generative":
+        if self.method != "generation":
             if self.separate_testset:
                 # first inference run on test set for metrics
                 print("Doing inference on test set for metrics. Result:\n")
@@ -246,14 +246,14 @@ class ActiveLearner:
                 trainer.evaluate(eval_dataset=self.dataset["corpus"])  # eval_dataset=encoded_dataset["test"]
             else:
                 metrics = trainer.evaluate(eval_dataset=self.dataset["corpus"])  # eval_dataset=encoded_dataset["test"]
-        elif self.method == "generative": 
-            # need to calculate metrics and uncertainty outside of trainer for generative models
+        elif self.method == "generation":
+            # need to calculate metrics and uncertainty outside of trainer for generation models
             # seq2seq trainer evaluate/prediction_step has issues like this hack https://github.com/huggingface/transformers/blob/v4.28.1/src/transformers/trainer_seq2seq.py#L273
             # this means that I cannot pass a generate_config, decode labels correctly, or calculate uncertainty in compute_metrics
-            metrics = self.metrics_uncertainty_generative(dataset=self.dataset["corpus"], dataset_type="corpus")
+            metrics = self.metrics_uncertainty_generation(dataset=self.dataset["corpus"], dataset_type="corpus")
             if self.separate_testset:
-                #raise NotImplementedError("Separate test set not implemented for generative models")
-                metrics = self.metrics_uncertainty_generative(dataset=self.dataset["test"], dataset_type="test")
+                #raise NotImplementedError("Separate test set not implemented for generation models")
+                metrics = self.metrics_uncertainty_generation(dataset=self.dataset["test"], dataset_type="test")
 
         self.metrics.update({f"iter_{self.n_iteration}": metrics})
         self.n_iteration += 1
@@ -268,7 +268,7 @@ class ActiveLearner:
         gc.collect()
 
 
-    def metrics_uncertainty_generative(self, dataset=None, dataset_type="corpus"):
+    def metrics_uncertainty_generation(self, dataset=None, dataset_type="corpus"):
         self.clean_memory()
         
         # TODO implement metrics calculation with different test-set
@@ -454,7 +454,7 @@ class ActiveLearner:
         df_corpus_original = self.df_corpus_original.copy(deep=True)
         df_corpus_al_sample = df_corpus_original[df_corpus_original.index.isin(self.index_train_all)]
 
-        if self.method == "generative":
+        if self.method == "generation":
             df_train_update = df_corpus_al_sample
         elif self.method == "nli":
             # reformat training data for NLI training format
@@ -468,8 +468,8 @@ class ActiveLearner:
         dataset_train_update = datasets.Dataset.from_pandas(df_train_update, preserve_index=True)
 
         # tokenize
-        if self.method == "generative":
-            dataset_train_update = dataset_train_update.map(self.tokenize_func_generative, batched=True)
+        if self.method == "generation":
+            dataset_train_update = dataset_train_update.map(self.tokenize_func_generation, batched=True)
         elif self.method == "nli":
             dataset_train_update = dataset_train_update.map(self.tokenize_func_nli, batched=True)
         elif self.method == "standard_dl":
@@ -478,7 +478,7 @@ class ActiveLearner:
             raise Exception(f"Tokenization not implemented for method {self.method}")
 
         # give seq2seq trainer only relevant columns
-        if self.method == "generative":
+        if self.method == "generation":
             dataset_train_update = dataset_train_update.remove_columns(
                 #dataset_eurepoc["train"].column_names
                 self.df_corpus.columns
@@ -708,7 +708,7 @@ class ActiveLearner:
 
     ## function not used.
     # compute metrics does not seem to work well for seq2seq trainer
-    def compute_metrics_generative(self, eval_pred):
+    def compute_metrics_generation(self, eval_pred):
 
         self.eval_pred = eval_pred
 
